@@ -7,7 +7,7 @@ openEMS is a free and open electromagnetic field solver using the FDTD method. O
 
 # openEMS Features:
 + Fully 3D Cartesian and cylindrical coordinates graded mesh
-+ Multi-threading, SIMD (SSE) and MPI support for high speed FDTD
++ Multi-threading, SIMD (SSE) and optional Vulkan acceleration for high speed FDTD
 + Octave/Matlab and Python-Interface
 + Dispersive material (Drude/Lorentz/Debye type)
 + Field dumps in time and frequency domain as vtk or hdf5 file format
@@ -17,4 +17,8 @@ openEMS is a free and open electromagnetic field solver using the FDTD method. O
 # Installation Instructions
 
 [https://docs.openems.de/install.html](https://docs.openems.de/install.html)
+
+For a CMake build with GPU support, pass `-DENABLE_VULKAN=ON` when configuring
+this project. Vulkan and shaderc must be available. MPI support has been removed
+upstream; use the multithreaded or Vulkan engine instead.
 
