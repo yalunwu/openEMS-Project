@@ -1,5 +1,6 @@
 """Package the MSVC install tree using the traditional openEMS ZIP layout."""
 import argparse
+from collections import Counter
 import hashlib
 import json
 import os
@@ -17,10 +18,37 @@ args = parser.parse_args()
 build = args.build_root.resolve()
 prefix = build / 'install'
 deps = build / 'dependencies/x64-windows-release'
+cache = (build / 'native/openEMS/CMakeCache.txt').read_text()
+cuda_compiler = re.search(r'^CMAKE_CUDA_COMPILER:[^=]+=(.+)$', cache, re.MULTILINE)
+cuda_architectures = re.search(r'^CMAKE_CUDA_ARCHITECTURES:[^=]+=(.+)$', cache, re.MULTILINE)
+if not re.search(r'^ENABLE_HIP:BOOL=ON$', cache, re.MULTILINE) or not cuda_compiler or not cuda_architectures:
+    raise RuntimeError('This release requires the HIP CUDA backend and configured GPU architectures')
+cuda = Path(cuda_compiler[1]).parent.parent
+requested_architectures = cuda_architectures[1]
+cuobjdump = cuda / 'bin/cuobjdump.exe'
+images = {}
+for kind, option, suffix in (('sass', '--list-elf', 'cubin'), ('ptx', '--list-ptx', 'ptx')):
+    output = subprocess.check_output([str(cuobjdump), option, str(prefix / 'bin/openEMS.dll')], text=True)
+    images[kind] = dict(sorted(Counter(re.findall(r'\.sm_([0-9]+[a-z]?)\.' + suffix, output)).items(),
+                               key=lambda item: (int(re.match(r'[0-9]+', item[0])[0]), item[0])))
+    if images[kind] and len(set(images[kind].values())) != 1:
+        raise RuntimeError(f'Incomplete CUDA {kind} architecture coverage: {images[kind]}')
+if not images['sass'] and not images['ptx']:
+    raise RuntimeError('The solver DLL contains no CUDA kernels')
+if requested_architectures == 'all' and ('61' not in images['sass'] or not images['ptx']):
+    raise RuntimeError('The all-architecture release requires Pascal sm_61 and PTX; build with CUDA 12.x')
+cuda_version = subprocess.check_output([cuda_compiler[1], '--version'], text=True).strip()
+cuda_info = {'architectures_requested': requested_architectures, 'images': images,
+             'compiler_version': cuda_version}
+native_targets = ', '.join('sm_' + arch for arch in images['sass']) or 'none'
+ptx_targets = ', '.join('compute_' + arch for arch in images['ptx']) or 'none'
+architecture_tag = re.sub(r'[^a-zA-Z0-9-]', '-', requested_architectures)
+if len(architecture_tag) > 32:
+    architecture_tag = hashlib.sha256(requested_architectures.encode()).hexdigest()[:12]
 description = subprocess.check_output(
     ['git', '-C', str(ROOT / 'openEMS'), 'describe', '--tags', '--always', '--dirty'], text=True).strip()
 project_revision = subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', '--short', 'HEAD'], text=True).strip()
-stem = f'openEMS_x64_{description}_{project_revision}_hip_msvc'
+stem = f'openEMS_x64_{description}_{project_revision}_hip_msvc_cuda-{architecture_tag}'
 stage = build / 'pkgstage'
 package = stage / 'openEMS'
 if package.exists():
@@ -78,11 +106,7 @@ dumpbin = next((args.vs_root / 'VC/Tools/MSVC').glob('*/bin/Hostx64/x64/dumpbin.
 runtime_dirs = list((args.vs_root / 'VC/Redist/MSVC').glob('*/x64/Microsoft.VC*.CRT'))
 runtime_dirs += list((args.vs_root / 'VC/Redist/MSVC').glob('*/x64/Microsoft.VC*.OpenMP'))
 search_dirs = [deps / 'bin', prefix / 'bin'] + runtime_dirs
-cache = (build / 'native/openEMS/CMakeCache.txt').read_text()
-cuda_compiler = re.search(r'^CMAKE_CUDA_COMPILER:[^=]+=(.+)$', cache, re.MULTILINE)
-if cuda_compiler:
-    cuda = Path(cuda_compiler[1]).parent.parent
-    search_dirs.append(cuda / 'bin')
+search_dirs.append(cuda / 'bin')
 system = Path(os.environ['SystemRoot']) / 'System32'
 queue = list(package.rglob('*.exe')) + list(package.rglob('*.dll')) + list(wheel_imports.rglob('*.pyd'))
 processed = set()
@@ -158,8 +182,12 @@ Octave/Matlab:
   Octave/Matlab and its HDF5 helper setup are separate prerequisites.
 
 GPU use: pass engine='gpu' to FDTD.Run(), or --engine=gpu to the command-line
-solver. This Windows HIP build uses CUDA and targets NVIDIA SM 86 (tested on
-RTX 3070). Install a compatible NVIDIA driver. CPU execution needs no GPU.
+solver. This Windows HIP build uses CUDA with these embedded targets:
+  Native kernels: {native_targets}
+  PTX for driver compilation: {ptx_targets}
+CUDA selects compatible code at runtime. Install a compatible NVIDIA driver.
+CPU execution needs no GPU. GPU architectures listed here were compiled;
+consult VALIDATION.txt for hardware tested with this package.
 Construction defaults to CPU. Require device construction with Python
 gpu_setup='gpu', or --gpu-setup=gpu; 'auto' permits fresh CPU fallback.
 Check HIP construction and stepping with python\\smoke_test.py --engine gpu.
@@ -179,6 +207,7 @@ for name in components:
         'diff': subprocess.check_output(command + ['diff', 'HEAD'], text=True),
     }
 info = {'name': stem, 'compiler': 'MSVC x64', 'hip': True, 'vulkan': False, 'python': ['3.13', '3.14'],
+        'cuda': cuda_info,
         'vtk_qt_quick': False,
         'revisions': revisions,
         'native_imports': sorted(dependency_names),

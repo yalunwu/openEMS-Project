@@ -1,7 +1,7 @@
 Build the standard Windows ZIP from an x64 Visual Studio Developer PowerShell:
 
 ```powershell
-.\scripts\build_windows_msvc.ps1 -Stage All -Jobs 4
+.\scripts\build_windows_msvc.ps1 -Stage All -CudaArchitectures all -Jobs 4
 ```
 
 The default workspace is `build/msvc-release`. Place a bootstrapped vcpkg
@@ -25,7 +25,9 @@ MATLAB scripts, CTB scripts, AppCSXCAD/Qt plugins and Python 3.13/3.14 wheels.
 Python itself is not bundled. Package assembly checks transitive DLL imports
 of executables, plugins and wheel extensions, copies runtime libraries and
 licenses, and emits a matching source ZIP and SHA-256 checksums in `build/release`.
-Archive names include the solver and meta-repository revisions. Existing
+Archive names include the solver and meta-repository revisions and CUDA target
+selection. BUILD-INFO.json and README.txt record the kernels actually embedded
+in the solver DLL, including the PTX targets. Existing
 release archives are never overwritten.
 
 After packaging, verify the extracted ZIP with:
@@ -41,9 +43,16 @@ both also run the official Python notch-filter smoke test. Python 3.14 runs
 all GPU engine regressions.
 Run the native CTest suites before distributing as well.
 
-The Windows HIP build uses CUDA; configure its headers/compiler and target
-architecture in openEMS/localConfig.cmake. The current local release targets
-NVIDIA SM 86. CPU construction remains the default; use
+The Windows HIP build uses CUDA; configure its headers/compiler in
+openEMS/localConfig.cmake. The release helper defaults to `-CudaArchitectures all`:
+native kernels for every architecture supported by the compiler, plus PTX for
+forward compatibility. Use CUDA 12.x to retain Maxwell, Pascal (including the
+Quadro P5000, SM 61) and Volta; CUDA 13 no longer compiles for these GPUs.
+Packaging rejects an `all` build without Pascal kernels or PTX. A narrower
+build can use, for example, `-CudaArchitectures '61;86'`. Local configuration
+must not force a different architecture over the helper's selection.
+Only hardware listed in the package's validation record has been runtime-tested.
+CPU construction remains the default; use
 `--engine=gpu --gpu-setup=gpu` or Python `engine='gpu', gpu_setup='gpu'` to require HIP setup.
 Packages from modified source are labeled previews and include untracked,
 non-ignored source files in the companion source ZIP.

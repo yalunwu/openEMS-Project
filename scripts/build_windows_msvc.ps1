@@ -2,6 +2,8 @@ param(
     [string]$BuildRoot = '',
     [ValidateSet('Dependencies', 'Native', 'Wheels', 'Package', 'All')]
     [string]$Stage = 'All',
+    [ValidatePattern('^(all|all-major|native|[0-9]+(-real|-virtual)?(;[0-9]+(-real|-virtual)?)*)$')]
+    [string]$CudaArchitectures = 'all',
     [int]$Jobs = 4
 )
 $ErrorActionPreference = 'Stop'
@@ -54,7 +56,9 @@ if ($Stage -in @('Native', 'All')) {
             '-DVCPKG_MANIFEST_MODE=OFF', "-DVCPKG_INSTALLED_DIR=$deps",
             "-DVCPKG_OVERLAY_TRIPLETS=$PSScriptRoot/msvc-release/triplets",
             "-DVCPKG_TARGET_TRIPLET=$triplet", "-DVCPKG_HOST_TRIPLET=$triplet")
-        if ($component -eq 'openEMS') { $options += @('-DENABLE_HIP=ON', '-DENABLE_METAL=OFF') }
+        if ($component -eq 'openEMS') {
+            $options += @('-DENABLE_HIP=ON', '-DENABLE_METAL=OFF', "-DCMAKE_CUDA_ARCHITECTURES=$CudaArchitectures")
+        }
         if ($component -eq 'CSXCAD') { $options += '-DCSXCAD_BUILD_TESTS=ON' }
         Invoke-Checked $cmake $options
         Invoke-Checked $cmake @('--build', $componentBuild, '--parallel', "$Jobs")
