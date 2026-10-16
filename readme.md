@@ -18,6 +18,9 @@ openEMS is a free and open electromagnetic field solver using the FDTD method. O
 
 [https://docs.openems.de/en/latest/install/index.html](https://docs.openems.de/en/latest/install/index.html)
 
+For local Windows MSVC builds and complete release ZIPs, see the
+[Windows release build instructions](scripts/msvc-release/README.md).
+
 # Contributing
 
 Pull requests are welcome. [AGENTS.md](AGENTS.md) has the working rules — build,
