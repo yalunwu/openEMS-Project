@@ -4,7 +4,8 @@ param(
     [string]$Stage = 'All',
     [ValidatePattern('^(all|all-major|native|[0-9]+(-real|-virtual)?(;[0-9]+(-real|-virtual)?)*)$')]
     [string]$CudaArchitectures = 'all',
-    [int]$Jobs = 4
+    [int]$Jobs = 4,
+    [string]$H5pyVersion = '3.16.0'
 )
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path $PSScriptRoot -Parent
@@ -78,7 +79,16 @@ if ($Stage -in @('Wheels', 'All')) {
         $venv = Join-Path $BuildRoot "wheel-venv-$version"
         Invoke-Checked $python @('-m', 'venv', $venv)
         $python = Join-Path $venv 'Scripts/python.exe'
-        Invoke-Checked $python @('-m', 'pip', 'install', 'cython', 'setuptools', 'setuptools-scm', 'wheel', 'numpy', 'h5py', 'matplotlib')
+        Invoke-Checked $python @('-m', 'pip', 'install', 'cython', 'setuptools', 'setuptools-scm', 'wheel', 'numpy', 'matplotlib', 'pkgconfig')
+        $env:HDF5_DIR = Join-Path $deps $triplet
+        $hdf5Config = Get-Content "$env:HDF5_DIR/include/H5pubconf.h" -Raw
+        $hdf5Match = [regex]::Match($hdf5Config, '#define H5_VERSION "([^"]+)"')
+        if (-not $hdf5Match.Success) { throw 'Cannot determine the release HDF5 version' }
+        $env:HDF5_VERSION = $hdf5Match.Groups[1].Value
+        Invoke-Checked $python @('-m', 'pip', 'wheel', '--no-build-isolation', '--no-deps', '--no-binary=h5py', "h5py==$H5pyVersion", '--wheel-dir', "$BuildRoot/h5py-wheels")
+        $tag = 'cp' + $version.Replace('.', '')
+        $h5pyWheel = Get-ChildItem "$BuildRoot/h5py-wheels" -Filter "h5py-*-$tag-$tag-win_amd64.whl"
+        Invoke-Checked $python @('-m', 'pip', 'install', '--no-deps', $h5pyWheel.FullName)
         foreach ($component in @('CSXCAD', 'openEMS')) {
             $wheelStage = Join-Path $BuildRoot "python-bdist/$version/$component-$([IO.Path]::GetRandomFileName())"
             Push-Location "$projectRoot/$component/python"
@@ -93,6 +103,7 @@ if ($Stage -in @('Wheels', 'All')) {
             }
         }
     }
+    Invoke-Checked $python @("$PSScriptRoot/msvc-release/bundle_h5py.py", '--wheel-dir', "$BuildRoot/h5py-wheels", '--output', "$BuildRoot/portable-h5py-wheels", '--deps', "$deps/$triplet", '--vs-root', $vsRoot)
 }
 if ($Stage -in @('Package', 'All')) {
     $python = Join-Path $BuildRoot 'tools/python-3.14/tools/python.exe'

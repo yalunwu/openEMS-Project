@@ -14,8 +14,16 @@ ROOT = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--build-root', type=Path, default=ROOT / 'build/msvc-release')
 parser.add_argument('--vs-root', type=Path, required=True)
+parser.add_argument('--vcpkg-root', type=Path)
+parser.add_argument('--h5py-wheels', type=Path)
+parser.add_argument('--validation-info', type=Path)
+parser.add_argument('--label', default='')
 args = parser.parse_args()
+if args.label and not re.fullmatch(r'[A-Za-z0-9-]+', args.label):
+    parser.error('--label must contain only letters, digits and hyphens')
 build = args.build_root.resolve()
+vcpkg = (args.vcpkg_root or build / 'vcpkg').resolve()
+h5py_wheels = (args.h5py_wheels or build / 'portable-h5py-wheels').resolve()
 prefix = build / 'install'
 deps = build / 'dependencies/x64-windows-release'
 cache = (build / 'native/openEMS/CMakeCache.txt').read_text()
@@ -48,8 +56,20 @@ if len(architecture_tag) > 32:
 description = subprocess.check_output(
     ['git', '-C', str(ROOT / 'openEMS'), 'describe', '--tags', '--always', '--dirty'], text=True).strip()
 project_revision = subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', '--short', 'HEAD'], text=True).strip()
-stem = f'openEMS_x64_{description}_{project_revision}_hip_msvc_cuda-{architecture_tag}'
-stage = build / 'pkgstage'
+components = ('', 'openEMS', 'CSXCAD', 'QCSXCAD', 'AppCSXCAD', 'fparser', 'CTB', 'hyp2mat')
+source_files = {}
+for component in components:
+    base = ROOT / component
+    listed = subprocess.check_output(['git', '-C', str(base), 'ls-files', '--cached', '--others', '--exclude-standard', '-z']).decode().split('\0')
+    for name in listed:
+        source = base / name
+        if source.is_file():
+            source_files[source.relative_to(ROOT).as_posix()] = source
+source_hashes = {name: hashlib.sha256(source.read_bytes()).hexdigest() for name, source in sorted(source_files.items())}
+source_digest = hashlib.sha256(json.dumps(source_hashes, sort_keys=True).encode()).hexdigest()
+suffix = '-' + args.label if args.label else ''
+stem = f'openEMS_x64_{description}_{project_revision}_{source_digest[:12]}_hip_msvc_cuda-{architecture_tag}{suffix}'
+stage = build / ('pkgstage' + suffix)
 package = stage / 'openEMS'
 if package.exists():
     raise SystemExit(f'Staging directory already exists: {package}')
@@ -76,6 +96,10 @@ for src in (ROOT / 'CTB').iterdir():
 (package / 'python').mkdir()
 wheel_imports = build / 'wheel-imports'
 for tag in ('cp313', 'cp314'):
+    matching_h5py = list(h5py_wheels.glob(f'h5py-*-{tag}-{tag}-win_amd64.whl'))
+    if len(matching_h5py) != 1:
+        raise RuntimeError(f'Expected one matching portable h5py {tag} wheel, got {matching_h5py}')
+    shutil.copy2(matching_h5py[0], package / 'python' / matching_h5py[0].name)
     for name in ('csxcad', 'openems'):
         wheels = list((build / 'wheels').glob(f'{name}-*-{tag}-{tag}-win_amd64.whl'))
         if len(wheels) != 1:
@@ -146,6 +170,23 @@ for src in (deps / 'share').glob('*/copyright'):
     destination = licenses / 'third-party' / src.parent.name
     destination.mkdir(parents=True)
     shutil.copy2(src, destination / 'copyright')
+hip_headers = []
+hip_include = re.search(r'^HIP_INCLUDE_DIR:[^=]+=(.+)$', cache, re.MULTILINE)
+if hip_include:
+    for index, directory in enumerate(hip_include[1].split(';')):
+        include = Path(directory)
+        candidates = [include] + list(include.parents)[:4]
+        root = next((p for p in candidates if any(f.is_file() and f.name.upper().startswith(('LICENSE', 'COPYING')) for f in p.iterdir())), None)
+        if root is None:
+            raise RuntimeError(f'Missing HIP header license near {include}')
+        destination = licenses / 'HIP' / f'{index}-{root.name}'
+        destination.mkdir(parents=True)
+        for source in root.iterdir():
+            if source.is_file() and source.name.upper().startswith(('LICENSE', 'COPYING')):
+                shutil.copy2(source, destination / source.name)
+        repository = next((p for p in [root] + list(root.parents) if (p / '.git').exists()), None)
+        revision = subprocess.check_output(['git', '-c', f'safe.directory={repository.as_posix()}', '-C', str(repository), 'rev-parse', 'HEAD'], text=True).strip() if repository else None
+        hip_headers.append({'component': root.name, 'revision': revision})
 shutil.copy2(build / 'dependencies/vcpkg/status', licenses / 'vcpkg-packages.txt')
 if cuda_compiler:
     (licenses / 'CUDA').mkdir()
@@ -162,6 +203,7 @@ Python 3.13 or 3.14 (standard 64-bit CPython, installed separately):
   2. Create an environment with your matching Python:
        py -3.14 -m venv .venv
   3. Install matching wheels (cp314 for 3.14, cp313 for 3.13):
+       .venv\\Scripts\\python -m pip install (Get-ChildItem python\\h5py-*-cp314-cp314-win_amd64.whl).FullName
        .venv\\Scripts\\python -m pip install (Get-ChildItem python\\csxcad-*-cp314-cp314-win_amd64.whl).FullName
        .venv\\Scripts\\python -m pip install (Get-ChildItem python\\openems-*-cp314-cp314-win_amd64.whl).FullName
   4. Tell Python where the DLLs are for this session:
@@ -172,7 +214,8 @@ Python 3.13 or 3.14 (standard 64-bit CPython, installed separately):
        .venv\\Scripts\\python python\\smoke_test.py
 
 Python is not bundled. Use the wheels matching the Python version; MinGW
-Python is not supported by these wheels. NumPy, Matplotlib and h5py are
+Python is not supported by these wheels. Install the supplied h5py wheel first:
+it includes the HDF5 runtime matching this solver. NumPy and Matplotlib are
 installed by pip as package dependencies (internet access required).
 Tutorials are in python\\Tutorials and matlab\\Tutorials.
 
@@ -199,7 +242,6 @@ Documentation: https://docs.openems.de
 ''', encoding='utf-8')
 (package / 'python/README.txt').write_text('See ../README.txt for Python 3.13/3.14 wheel installation instructions.\n')
 revisions = {}
-components = ('', 'openEMS', 'CSXCAD', 'QCSXCAD', 'AppCSXCAD', 'fparser', 'CTB', 'hyp2mat')
 for name in components:
     command = ['git', '-C', str(ROOT / name)]
     revisions[name or 'openEMS-Project'] = {
@@ -208,10 +250,24 @@ for name in components:
     }
 info = {'name': stem, 'compiler': 'MSVC x64', 'hip': True, 'vulkan': False, 'python': ['3.13', '3.14'],
         'cuda': cuda_info,
+        'hip_headers': hip_headers,
         'vtk_qt_quick': False,
         'revisions': revisions,
         'native_imports': sorted(dependency_names),
-        'vcpkg_commit': subprocess.check_output(['git', '-C', str(build / 'vcpkg'), 'rev-parse', 'HEAD'], text=True).strip()}
+        'source_sha256': source_digest,
+        'source_files': source_hashes,
+        'solver_dll_sha256': hashlib.sha256((prefix / 'bin/openEMS.dll').read_bytes()).hexdigest(),
+        'vcpkg_commit': subprocess.check_output(['git', '-C', str(vcpkg), 'rev-parse', 'HEAD'], text=True).strip()}
+info['build_options'] = {}
+for key in ('CMAKE_BUILD_TYPE', 'CMAKE_CXX_COMPILER', 'CMAKE_CXX_FLAGS', 'CMAKE_CXX_FLAGS_RELEASE',
+            'CMAKE_CUDA_FLAGS', 'CMAKE_CUDA_FLAGS_RELEASE', 'ENABLE_HIP', 'ENABLE_METAL',
+            'ENABLE_FLUSH_TO_ZERO', 'OPENEMS_BUILD_TESTS'):
+    value = re.search(r'^' + key + r':[^=]+=(.*)$', cache, re.MULTILINE)
+    if value:
+        info['build_options'][key] = value[1]
+if args.validation_info:
+    info['validation'] = json.loads(args.validation_info.read_text())
+(package / 'VALIDATION.txt').write_text(json.dumps(info.get('validation', {'status': 'Unvalidated package; do not distribute'}), indent=2) + '\n', encoding='utf-8')
 (package / 'BUILD-INFO.json').write_text(json.dumps(info, indent=2), encoding='utf-8')
 out = ROOT / 'build/release'
 out.mkdir(exist_ok=True)
@@ -226,15 +282,9 @@ with zipfile.ZipFile(binary_zip, 'w', zipfile.ZIP_DEFLATED) as archive:
             archive.write(src, src.relative_to(stage).as_posix())
 with zipfile.ZipFile(source_zip, 'w', zipfile.ZIP_DEFLATED) as archive:
     archived = set()
-    for name in components:
-        base = ROOT / name
-        files = subprocess.check_output(['git', '-C', str(base), 'ls-files', '--cached', '--others', '--exclude-standard', '-z']).decode().split('\0')
-        for file in files:
-            src = base / file
-            if src.is_file():
-                relative = src.relative_to(ROOT).as_posix()
-                archive.write(src, 'openEMS-source/' + relative)
-                archived.add(relative)
+    for relative, src in sorted(source_files.items()):
+        archive.write(src, 'openEMS-source/' + relative)
+        archived.add(relative)
     for src in (ROOT / 'scripts').rglob('*'):
         if src.is_file() and src.relative_to(ROOT).as_posix() not in archived and '__pycache__' not in src.parts:
             archive.write(src, 'openEMS-source/' + src.relative_to(ROOT).as_posix())
